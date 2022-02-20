@@ -128,16 +128,82 @@ var frag_phong = `#version 300 es
     }
 `;
 
+var vertex_flatwire = `#version 300 es
+    in vec4 a_position; // in instead of attribute
+    in vec4 a_color; // in instead of attribute
+    in vec4 a_normal; // in instead of attribute
+    in vec2 a_texcoord; // in instead of attribute
+    in vec3 a_barycoord; // barycentric coordinates
+
+    uniform mat4 u_mvp_mat;
+    uniform mat4 u_mormal_mat;
+
+    out vec4 v_color; // out instead of varying
+    out vec2 v_texcoord; // out instead of varying
+    out vec3 v_barycoord; // out instead of varying
+
+    void main() {
+        vec3 light_dir = vec3(-0.35, 0.35, 0.87); // directional light 
+        vec3 normal = normalize(vec3(u_mormal_mat * a_normal));
+        float diffuse = max(dot(normal, light_dir), 0.0);
+        v_color = vec4(a_color.rgb * diffuse, a_color.a);
+        v_texcoord = a_texcoord;
+        v_barycoord = a_barycoord;
+
+        gl_Position = u_mvp_mat * a_position;
+    }
+`;
+
+var frag_flatwire = `#version 300 es
+    precision mediump float;
+
+    uniform sampler2D u_image;
+    uniform bool u_is_texture;
+    in vec2 v_texcoord;
+    in vec3 v_barycoord;
+
+    in vec4 v_color; // in instead of varying
+    out vec4 cg_FragColor; // user-defined instead of gl_FragColor
+
+    float edge_factor() {
+        vec3 grad = fwidth(v_barycoord);
+        // fwidth(I) is equivalent to abs(Ix) + abs(Iy)
+        // fwidth is screenspace image gradient of image I
+        // fwidth is biggest at edge 
+        //float edge_width = 1.5;
+        float edge_width = 1.0;        
+        vec3 b = smoothstep(vec3(0.0), grad * edge_width, v_barycoord);
+        // create a smooth ramp within [0.0, d*1.5] x [0.0, 1.0]
+        // smoothstep performs antialiasing of wireframe lines
+        return min(min(b.x, b.y), b.z);
+    }
+
+    void main() {
+        vec4 cout;
+        if (u_is_texture) {
+            vec3 c = texture(u_image, v_texcoord).rgb; // texel color
+            c = c * v_color.rgb; // obj shaded and textured
+            cout = vec4(c, 1.0);
+        }
+        else cout = v_color;  
+
+        vec4 cline = vec4(1.0); // white wireframe line
+        float t = edge_factor(); // 0 if edge, 1 otherwise
+        cg_FragColor = mix(cline, cout, t); // if near edge, give higher weight to cline
+    }
+`;
+
 let config = {
     SPEED_X: 0.0,
     SPEED_Y: 0.0,
-    CAMERA_DIST: 30,
+    CAMERA_DIST: 400,
     SHADER: 0,
 }
 
+//what will be correct value
 let gui = new dat.GUI({ width: 300 });
 function startGUI() {
-    gui.add(config, 'SHADER', { 'gouraud': 0, 'phong': 1 }).name('shader').onFinishChange(update_bind);
+    gui.add(config, 'SHADER', { 'gouraud': 0, 'phong': 1, 'flatwire': 2  }).name('shader').onFinishChange(update_bind);
 }
 startGUI();
 
@@ -282,6 +348,7 @@ function main() {
     // Initialize shaders    
     g_prog.push(new GLProgram(vertex_gouraud, frag_gouraud));
     g_prog.push(new GLProgram(vertex_phong, frag_phong));
+    g_prog.push(new GLProgram(vertex_flatwire, frag_flatwire));
     g_prog[0].bind(); // initially, use first shader program
 
     cg_register_event_handlers();
@@ -291,11 +358,12 @@ function main() {
     gl.enable(gl.DEPTH_TEST);
 
     // Start reading the OBJ file
-    //get_obj_file(url, 0.3, true); // utah-teapot.obj
+    get_obj_file(url, 0.001, true); // buddha2.obj
+    get_obj_file(url, 0.3, true); // utah-teapot.obj
     //get_obj_file(url, 1, true);
     //get_obj_file(url, 2, true);
     //get_obj_file(url, 3, true);
-    get_obj_file(url, 5, true);
+    //get_obj_file(url, 5, true);
     //get_obj_file(url, 10, true);    
 
     render();
@@ -359,7 +427,7 @@ function get_obj_file(obj_filename, scale, reverse) {
 
 // Ajax for .obj file returned. Now let's parse .obj file
 function read_obj_file(file_string, obj_filename, scale, reverse) {
-    console.log(file_string);
+
     g_obj = new OBJ(obj_filename);
     // Create an OBJ object
     var result = g_obj.parse(file_string, scale, reverse);
@@ -459,6 +527,8 @@ var OBJ = function (obj_filename) {
     // Initialize the normal vectors
     this.texcoord = new Array(0);
     // Initialize the texture coordinates
+    this.vnfound = false;
+    // check if vnfound
 }
 
 // Parsing the OBJ file
@@ -550,6 +620,7 @@ OBJ.prototype.parse = function (file_string, scale, reverse) {
                 // Read vertex normal
                 var normal = this.parse_normal(sp);
                 this.norm.push(normal); // add vertex normal to norm array
+                this.vnfound = true; // this will be used for comparision
                 continue;
             // Go to the next line
             case 'vt':
@@ -854,7 +925,9 @@ OBJ.prototype.get_data = function () {
                 var nIdx = face.n_index[k];
 
                 // Copy normal
-                if (nIdx >= 0) {
+                //if vn found then only use normal otherwise go 
+                //for facenormal
+                if (nIdx >= 0 && this.vnfound === true) {
                     var normal = this.norm[nIdx];
 
                     normals[ii * 3 + 0] = normal.x;
